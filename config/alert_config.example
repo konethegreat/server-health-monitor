@@ -1,0 +1,6 @@
+# SLACK_WEBHOOK_URL="https://hooks.slack.com/services/XXXXX"
+# SMTP_SERVER="smtp.gmail.com"
+# SMTP_PORT=587
+# SENDER_EMAIL="your@email.com"
+# RECEIVER_EMAIL="admin@email.com"
+# EMAIL_PASSWORD="your_app_password"
