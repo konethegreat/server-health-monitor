@@ -40,13 +40,26 @@ MEMORY_THRESHOLD = 85  # Percent
 DISK_THRESHOLD = 90  # Percent
 
 
-# Logging configuration
-LOG_FILE = "/var/log/health_monitor.log"
+# ======================
+# LOGGING CONFIGURATION (FIXED FOR WINDOWS)
+# ======================
+import os
+from pathlib import Path
+
+# Create logs directory in project root (works on Windows/Linux)
+PROJECT_ROOT = Path(__file__).parent.parent
+LOGS_DIR = PROJECT_ROOT / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)  # Create if doesn't exist
+
+LOG_FILE = LOGS_DIR / "health_monitor.log"
+
+# Configure logging AFTER ensuring directory exists
 logging.basicConfig(
     filename=LOG_FILE,
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
+logging.info("✅ Logging system initialized successfully")
 # This creates a log file to track all monitoring activities [[9]]
 
 # ======================
