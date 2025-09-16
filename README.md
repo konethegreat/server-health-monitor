@@ -24,3 +24,12 @@ This project demonstrates:
 - Alerting system implementation
 - Docker containerization
 - Professional code documentation
+
+## 🚨 Common Windows Issue: Log Path Error
+
+If you see `FileNotFoundError: [Errno 2] No such file or directory: 'C:\\var\\log\\...'`:
+
+1. The script uses Linux paths by default
+2. **Fix**: Update `health_check.py` with the cross-platform logging solution shown above
+3. This is already implemented in the current version
+
