@@ -1,0 +1,12 @@
+# Keep real settings, logs and local clutter out of the build context
+.git
+.github
+.env
+config/alert_config
+logs/
+tests/
+**/__pycache__
+**/*.pyc
+.pytest_cache/
+venv/
+.venv/
