@@ -320,7 +320,13 @@ def run_health_check(metrics_source=collect_metrics, notifiers=None, thresholds=
 # ======================
 
 def main():
-    """Load the configuration, set up logging and run one health check"""
+    """Load the configuration, set up logging and run one health check.
+
+    Exit status: 0 when the check ran, even if a threshold was exceeded (the
+    alerts are the signal for that); 1 when the check failed or a reading could
+    not be taken; 2 when the configuration is invalid. Nothing is printed
+    unless something went wrong, so a scheduler only reports real problems.
+    """
     load_dotenv(CONFIG_FILE)
 
     # Create log directory if it doesn't exist (works on Windows and Linux)
@@ -333,13 +339,20 @@ def main():
     logging.info("Logging system initialized successfully")
 
     try:
-        run_health_check()
+        result = run_health_check()
     except ConfigError as e:
         logging.critical(f"Invalid configuration: {e}")
         print(f"Configuration error: {e}", file=sys.stderr)
         sys.exit(2)
     except Exception as e:
         logging.critical(f"Health check script failed: {str(e)}")
+        print(f"Health check failed: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if result.unreadable:
+        names = ", ".join(LABELS[name] for name in result.unreadable)
+        print(f"Health check incomplete, could not read: {names} (see {LOG_FILE})", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
