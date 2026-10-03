@@ -293,6 +293,93 @@ def test_main_reports_invalid_configuration_and_exits_with_status_2(monkeypatch,
     assert "CPU_THRESHOLD" in capsys.readouterr().err
 
 
+# ------------------------------------------- notification configuration
+
+SLACK_ENV = {"SLACK_WEBHOOK_URL": "https://example.invalid/hook"}
+EMAIL_ENV = {
+    "SENDER_EMAIL": "monitor@example.invalid",
+    "RECEIVER_EMAIL": "admin@example.invalid",
+    "EMAIL_PASSWORD": "not-a-real-password",
+}
+
+
+def channel_names(env):
+    return [notifier.name for notifier in hc.build_notifiers(env)]
+
+
+def test_no_alert_channel_is_enabled_without_configuration():
+    assert channel_names({}) == []
+    assert channel_names({"SLACK_WEBHOOK_URL": "  ", "SMTP_SERVER": "smtp.example.invalid"}) == []
+
+
+def test_slack_is_enabled_by_a_webhook_url():
+    assert channel_names(SLACK_ENV) == ["Slack"]
+
+
+def test_email_is_enabled_by_sender_receiver_and_password():
+    assert channel_names(EMAIL_ENV) == ["Email"]
+
+
+def test_both_channels_are_used_when_both_are_configured():
+    assert channel_names({**SLACK_ENV, **EMAIL_ENV}) == ["Slack", "Email"]
+
+
+@pytest.mark.parametrize("missing", sorted(EMAIL_ENV))
+def test_partial_email_settings_disable_email_and_warn_without_leaking_values(missing, caplog):
+    env = {name: value for name, value in EMAIL_ENV.items() if name != missing}
+
+    with caplog.at_level(logging.WARNING):
+        assert channel_names(env) == []
+
+    assert missing in caplog.text
+    assert "not-a-real-password" not in caplog.text
+
+
+def test_invalid_smtp_port_is_a_configuration_error():
+    with pytest.raises(hc.ConfigError, match="SMTP_PORT"):
+        hc.build_notifiers({**EMAIL_ENV, "SMTP_PORT": "five-eight-seven"})
+
+
+def test_smtp_port_is_not_checked_while_email_is_disabled():
+    assert channel_names({"SMTP_PORT": "five-eight-seven"}) == []
+
+
+def test_slack_notifier_posts_the_alert_body_to_the_configured_webhook(monkeypatch):
+    posted = []
+    monkeypatch.setattr(requests, "post", lambda url, **kw: posted.append((url, kw)) or FakeResponse())
+
+    (notifier,) = hc.build_notifiers(SLACK_ENV)
+    notifier.send("SUBJECT", "the alert body")
+
+    ((url, kwargs),) = posted
+    assert url == "https://example.invalid/hook"
+    assert "the alert body" in kwargs["json"]["text"]
+
+
+def test_email_notifier_defaults_to_gmail_on_port_587(monkeypatch):
+    FakeSMTP.instances = []
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+
+    (notifier,) = hc.build_notifiers(EMAIL_ENV)
+    notifier.send("SUBJECT", "the alert body")
+
+    (smtp,) = FakeSMTP.instances
+    assert (smtp.server, smtp.port) == ("smtp.gmail.com", 587)
+    assert ("login", "monitor@example.invalid") in smtp.calls
+
+
+def test_email_notifier_uses_the_configured_server_and_port(monkeypatch):
+    FakeSMTP.instances = []
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    env = {**EMAIL_ENV, "SMTP_SERVER": "smtp.example.invalid", "SMTP_PORT": "2525"}
+
+    (notifier,) = hc.build_notifiers(env)
+    notifier.send("SUBJECT", "the alert body")
+
+    (smtp,) = FakeSMTP.instances
+    assert (smtp.server, smtp.port) == ("smtp.example.invalid", 2525)
+
+
 # ------------------------------------------------------------------ senders
 
 

@@ -155,34 +155,54 @@ def send_email_alert(email_config, subject, body):
             message
         )
 
+EMAIL_REQUIRED = ("SENDER_EMAIL", "RECEIVER_EMAIL", "EMAIL_PASSWORD")
+
 def load_email_config(environ=None):
-    """Read the SMTP settings from the environment (config/alert_config is loaded into it)"""
+    """SMTP settings from the environment, or None when email alerts are not configured.
+
+    Email is enabled only when SENDER_EMAIL, RECEIVER_EMAIL and EMAIL_PASSWORD
+    are all set. SMTP_SERVER defaults to smtp.gmail.com and SMTP_PORT to 587.
+    """
     env = os.environ if environ is None else environ
+    missing = [name for name in EMAIL_REQUIRED if not env.get(name, "").strip()]
+    if len(missing) == len(EMAIL_REQUIRED):
+        logging.info("Email alerts are disabled: SENDER_EMAIL, RECEIVER_EMAIL and EMAIL_PASSWORD are not set")
+        return None
+    if missing:
+        logging.warning(f"Email alerts are disabled: {', '.join(missing)} not set")
+        return None
+
+    port = env.get("SMTP_PORT", "").strip() or "587"
+    try:
+        smtp_port = int(port)
+    except ValueError:
+        raise ConfigError(f"SMTP_PORT must be a whole number, got {port!r}") from None
     return {
-        "smtp_server": env.get("SMTP_SERVER", "smtp.gmail.com"),
-        "smtp_port": int(env.get("SMTP_PORT", "587")),
-        "sender_email": env.get("SENDER_EMAIL", "dev@example.com"),
-        "receiver_email": env.get("RECEIVER_EMAIL", "dev@example.com"),
-        "password": env.get("EMAIL_PASSWORD", "DEV_PASSWORD"),
+        "smtp_server": env.get("SMTP_SERVER", "").strip() or "smtp.gmail.com",
+        "smtp_port": smtp_port,
+        "sender_email": env["SENDER_EMAIL"].strip(),
+        "receiver_email": env["RECEIVER_EMAIL"].strip(),
+        "password": env["EMAIL_PASSWORD"],
     }
 
 def build_notifiers(environ=None):
-    """Create the alert channels from the environment.
+    """Create the alert channels that are configured in the environment.
 
-    The Slack webhook URL is a secret: it has no default and Slack alerts stay
-    off until SLACK_WEBHOOK_URL is set.
+    Both channels are off until configured. The Slack webhook URL is a secret
+    with no default: Slack alerts need SLACK_WEBHOOK_URL.
     """
     env = os.environ if environ is None else environ
     notifiers = []
 
-    webhook_url = env.get("SLACK_WEBHOOK_URL", "")
+    webhook_url = env.get("SLACK_WEBHOOK_URL", "").strip()
     if webhook_url:
         notifiers.append(Notifier("Slack", lambda subject, body: send_slack_alert(webhook_url, body)))
     else:
         logging.info("SLACK_WEBHOOK_URL is not set; Slack alerts are disabled")
 
     email_config = load_email_config(env)
-    notifiers.append(Notifier("Email", lambda subject, body: send_email_alert(email_config, subject, body)))
+    if email_config:
+        notifiers.append(Notifier("Email", lambda subject, body: send_email_alert(email_config, subject, body)))
     return notifiers
 
 def deliver(notifiers, subject, body):
