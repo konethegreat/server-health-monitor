@@ -355,9 +355,14 @@ def test_fractional_thresholds_are_described_without_padding():
     assert hc.Breach("cpu", 76.0, 75.0).describe() == "High CPU usage: 76.0% (threshold: 75%)"
 
 
-def test_main_reports_invalid_configuration_and_exits_with_status_2(monkeypatch, tmp_path, capsys):
+@pytest.fixture
+def isolated_main(monkeypatch, tmp_path):
+    """Let main() run without touching the repository: no config file, logs in a temp folder."""
     monkeypatch.setattr(hc, "CONFIG_FILE", tmp_path / "no-such-config")
     monkeypatch.setattr(hc, "LOG_FILE", tmp_path / "logs" / "health_monitor.log")
+
+
+def test_main_reports_invalid_configuration_and_exits_with_status_2(isolated_main, monkeypatch, capsys):
     monkeypatch.setenv("CPU_THRESHOLD", "abc")
 
     with pytest.raises(SystemExit) as excinfo:
@@ -365,6 +370,42 @@ def test_main_reports_invalid_configuration_and_exits_with_status_2(monkeypatch,
 
     assert excinfo.value.code == 2
     assert "CPU_THRESHOLD" in capsys.readouterr().err
+
+
+def test_main_exits_with_status_1_and_prints_the_reason_when_the_check_fails(isolated_main, monkeypatch, capsys):
+    def crash():
+        raise RuntimeError("psutil exploded")
+
+    monkeypatch.setattr(hc, "run_health_check", crash)
+
+    with pytest.raises(SystemExit) as excinfo:
+        hc.main()
+
+    assert excinfo.value.code == 1
+    assert "RuntimeError: psutil exploded" in capsys.readouterr().err
+
+
+def test_main_exits_with_status_1_when_a_reading_could_not_be_taken(isolated_main, monkeypatch, capsys):
+    incomplete = hc.HealthResult(metrics={"cpu": 1, "memory": 2}, breaches=[], unreadable=["disk"])
+    monkeypatch.setattr(hc, "run_health_check", lambda: incomplete)
+
+    with pytest.raises(SystemExit) as excinfo:
+        hc.main()
+
+    assert excinfo.value.code == 1
+    assert "could not read: Disk" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("breaches", [[], [hc.Breach("cpu", 95, 80)]], ids=["healthy", "threshold exceeded"])
+def test_main_returns_normally_and_stays_silent_when_the_check_ran(breaches, isolated_main, monkeypatch, capsys):
+    """Exit status 0 means the check ran; a threshold being exceeded is reported by the alerts, not the status."""
+    ran = hc.HealthResult(metrics={"cpu": 95, "memory": 2, "disk": 3}, breaches=breaches)
+    monkeypatch.setattr(hc, "run_health_check", lambda: ran)
+
+    hc.main()  # no SystemExit
+
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
 
 
 # ------------------------------------------- notification configuration
