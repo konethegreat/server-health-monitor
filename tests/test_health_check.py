@@ -6,15 +6,18 @@ depend on the machine's real load and nothing touches the network.
 
 import datetime
 import logging
+import pathlib
 import smtplib
 
 import pytest
 import requests
+from dotenv import dotenv_values
 
 import health_check as hc
 
 DEFAULTS = hc.DEFAULT_THRESHOLDS  # cpu 80, memory 85, disk 90 (percent)
 NOW = datetime.datetime(2026, 10, 3, 12, 0, 0)
+EXAMPLE_CONFIG = pathlib.Path(__file__).resolve().parent.parent / "config" / "alert_config.example"
 
 # Every environment variable the monitor reads; cleared so a developer's own settings cannot leak into tests
 CONFIG_VARIABLES = (
@@ -351,6 +354,16 @@ def test_invalid_smtp_port_is_a_configuration_error():
 
 def test_smtp_port_is_not_checked_while_email_is_disabled():
     assert channel_names({"SMTP_PORT": "five-eight-seven"}) == []
+
+
+def test_example_config_matches_the_defaults_and_enables_nothing():
+    """config/alert_config.example must stay loadable, show the real defaults and hold no credentials."""
+    values = dotenv_values(EXAMPLE_CONFIG)
+
+    assert hc.load_thresholds(values) == hc.load_thresholds({})
+    assert hc.build_notifiers(values) == []
+    assert values["SLACK_WEBHOOK_URL"] == ""
+    assert values["EMAIL_PASSWORD"] == ""
 
 
 def test_slack_notifier_posts_the_alert_body_to_the_configured_webhook(monkeypatch):

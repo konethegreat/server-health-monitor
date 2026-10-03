@@ -1,6 +1,32 @@
-# SLACK_WEBHOOK_URL="https://hooks.slack.com/services/XXXXX"
-# SMTP_SERVER="smtp.gmail.com"
-# SMTP_PORT=587
-# SENDER_EMAIL="your@email.com"
-# RECEIVER_EMAIL="admin@email.com"
-# EMAIL_PASSWORD="your_app_password"
+# Server Health Monitor configuration
+#
+# Copy this file to config/alert_config and edit the copy. config/alert_config
+# is listed in .gitignore: never commit real values.
+#
+# A variable that is already set in the environment takes precedence over this
+# file. Quote a value that contains spaces or " #" (for example
+# EMAIL_PASSWORD="my pass #1"). The loader expands ${NAME} references, so put a
+# value that contains "${" in the environment instead of in this file.
+
+# --- Thresholds (percent used) ---
+# An alert is sent when usage is greater than the threshold. Allowed range: 0-100.
+CPU_THRESHOLD=80
+MEMORY_THRESHOLD=85
+DISK_THRESHOLD=90
+
+# --- Disk to measure ---
+# Any path on the filesystem to watch (for example /var or C:\). Default: /
+# DISK_PATH=/
+
+# --- Slack alerts ---
+# Paste the URL of a Slack incoming webhook. Leave it empty to disable Slack alerts.
+SLACK_WEBHOOK_URL=
+
+# --- Email alerts (SMTP with STARTTLS) ---
+# Email is enabled only when SENDER_EMAIL, RECEIVER_EMAIL and EMAIL_PASSWORD are
+# all set. Use an app password here if your mail provider requires one for SMTP.
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+SENDER_EMAIL=
+RECEIVER_EMAIL=
+EMAIL_PASSWORD=
