@@ -25,7 +25,10 @@ import os
 load_dotenv('config/alert_config')
 
 # Get configuration values (with fallbacks for development)
-SLACK_WEBHOOK_URL = os.getenv("REDACTED_EXPOSED_SLACK_CREDENTIAL", "TEST_WEBHOOK_URL")
+# The Slack webhook URL is a secret: it is read only from the environment (or
+# config/alert_config) and has no default. Slack alerts stay off until
+# SLACK_WEBHOOK_URL is set.
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 EMAIL_CONFIG = {
     "smtp_server": os.getenv("SMTP_SERVER", "smtp.gmail.com"),
     "smtp_port": int(os.getenv("SMTP_PORT", "587")),
@@ -92,6 +95,9 @@ def check_disk():
 
 def send_slack_alert(message):
     """Send alert to Slack using webhook"""
+    if not SLACK_WEBHOOK_URL:
+        logging.info("SLACK_WEBHOOK_URL is not set; skipping Slack alert")
+        return
     payload = {
         "text": f"⚠️ SERVER ALERT ⚠️\n{message}",
         "username": "Health Monitor",
