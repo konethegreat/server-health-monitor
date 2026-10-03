@@ -22,6 +22,7 @@ import health_check as hc
 
 DEFAULTS = hc.DEFAULT_THRESHOLDS  # cpu 80, memory 85, disk 90 (percent)
 NOW = datetime.datetime(2026, 10, 3, 12, 0, 0)
+HOST = "test-host"
 
 # The real senders, kept before the autouse fixture below replaces them. Only the
 # loopback timeout tests use them.
@@ -84,6 +85,7 @@ def run(channels, **readings):
         metrics_source=lambda: metrics(**readings),
         notifiers=[channel.notifier for channel in channels],
         now=lambda: NOW,
+        hostname=lambda: HOST,
     )
 
 
@@ -156,11 +158,23 @@ def test_breach_sends_one_alert_per_channel_listing_every_issue():
     for channel in (slack, email):
         assert len(channel.sent) == 1  # one message for the whole run, not one per breach
         subject, body = channel.sent[0]
-        assert subject == "SERVER HEALTH ALERT"
+        assert subject == "SERVER HEALTH ALERT: test-host"
+        assert "Host: test-host" in body
         assert "Time: 2026-10-03 12:00:00" in body
         assert "High CPU usage: 91.5% (threshold: 80%)" in body
         assert "High Disk usage: 95% (threshold: 90%)" in body
         assert "Memory" not in body
+
+
+def test_alert_names_this_machine_by_default(monkeypatch):
+    monkeypatch.setattr(hc.socket, "gethostname", lambda: "box-7")
+    channel = FakeChannel("Slack")
+
+    hc.run_health_check(metrics_source=lambda: metrics(cpu=95), notifiers=[channel.notifier], now=lambda: NOW)
+
+    subject, body = channel.sent[0]
+    assert subject == "SERVER HEALTH ALERT: box-7"
+    assert "Host: box-7" in body
 
 
 def test_failed_channel_is_reported_and_does_not_block_the_others(caplog):
@@ -696,6 +710,23 @@ def test_email_with_non_ascii_text_is_sent_and_reads_back_unchanged(monkeypatch)
 
     assert message["Subject"] == subject
     assert message.get_content().strip() == body
+
+
+def test_alert_for_a_host_with_a_non_ascii_name_is_emailed_intact(monkeypatch):
+    """The host name goes into the subject and the body, so it has to survive the trip through SMTP."""
+    FakeSMTP.instances = []
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    (notifier,) = hc.build_notifiers(EMAIL_ENV)
+    host = "k\N{LATIN SMALL LETTER O WITH DIAERESIS}ln-01"
+
+    result = hc.run_health_check(
+        metrics_source=lambda: metrics(cpu=95), notifiers=[notifier], now=lambda: NOW, hostname=lambda: host
+    )
+
+    assert result.deliveries == {"Email": True}
+    message = delivered_message(FakeSMTP.instances[0])
+    assert message["Subject"] == f"SERVER HEALTH ALERT: {host}"
+    assert f"Host: {host}" in message.get_content()
 
 
 def test_every_comma_separated_receiver_is_sent_the_alert(monkeypatch):

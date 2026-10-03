@@ -11,6 +11,7 @@ import datetime
 import logging
 import os
 import smtplib
+import socket
 import sys
 from dataclasses import dataclass, field
 from email.message import EmailMessage
@@ -274,7 +275,7 @@ class HealthResult:
         """True only if every metric was read and none is above its threshold"""
         return not self.breaches and not self.unreadable
 
-def run_health_check(metrics_source=collect_metrics, notifiers=None, thresholds=None, now=datetime.datetime.now):
+def run_health_check(metrics_source=collect_metrics, notifiers=None, thresholds=None, now=datetime.datetime.now, hostname=None):
     """Run all health checks and trigger alerts if needed.
 
     metrics_source: callable returning {"cpu": ..., "memory": ..., "disk": ...} (percent);
@@ -282,6 +283,7 @@ def run_health_check(metrics_source=collect_metrics, notifiers=None, thresholds=
     notifiers: list of Notifier; defaults to the channels configured in the environment
     thresholds: mapping of metric name to threshold; defaults to load_thresholds()
     now: callable returning the current datetime
+    hostname: callable returning the name of this machine; defaults to socket.gethostname
     """
     timestamp = now().strftime("%Y-%m-%d %H:%M:%S")
     logging.info(f"Starting health check at {timestamp}")
@@ -296,10 +298,11 @@ def run_health_check(metrics_source=collect_metrics, notifiers=None, thresholds=
 
     # Send alerts if issues found
     if breaches:
+        host = (hostname or socket.gethostname)()
         alert_message = "\n".join(breach.describe() for breach in breaches)
-        full_message = f"Server Health Alert!\nTime: {timestamp}\n\n{alert_message}"
+        full_message = f"Server Health Alert!\nHost: {host}\nTime: {timestamp}\n\n{alert_message}"
 
-        result.deliveries = deliver(notifiers, ALERT_SUBJECT, full_message)
+        result.deliveries = deliver(notifiers, f"{ALERT_SUBJECT}: {host}", full_message)
         if not notifiers:
             logging.warning(
                 "No alert channel is configured, so no alert was sent "
