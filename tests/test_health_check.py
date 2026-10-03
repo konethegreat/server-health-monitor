@@ -16,6 +16,19 @@ import health_check as hc
 DEFAULTS = hc.DEFAULT_THRESHOLDS  # cpu 80, memory 85, disk 90 (percent)
 NOW = datetime.datetime(2026, 10, 3, 12, 0, 0)
 
+# Every environment variable the monitor reads; cleared so a developer's own settings cannot leak into tests
+CONFIG_VARIABLES = (
+    "CPU_THRESHOLD",
+    "MEMORY_THRESHOLD",
+    "DISK_THRESHOLD",
+    "SLACK_WEBHOOK_URL",
+    "SMTP_SERVER",
+    "SMTP_PORT",
+    "SENDER_EMAIL",
+    "RECEIVER_EMAIL",
+    "EMAIL_PASSWORD",
+)
+
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
@@ -26,7 +39,7 @@ def no_network(monkeypatch):
 
     monkeypatch.setattr(requests, "post", blocked)
     monkeypatch.setattr(smtplib, "SMTP", blocked)
-    for name in ("SLACK_WEBHOOK_URL", "SMTP_SERVER", "SMTP_PORT", "SENDER_EMAIL", "RECEIVER_EMAIL", "EMAIL_PASSWORD"):
+    for name in CONFIG_VARIABLES:
         monkeypatch.delenv(name, raising=False)
 
 
@@ -185,6 +198,62 @@ def test_collect_metrics_maps_psutil_readings(monkeypatch):
     monkeypatch.setattr(hc.psutil, "disk_usage", lambda path: Disk())
 
     assert hc.collect_metrics() == {"cpu": 33.0, "memory": 61.5, "disk": 72.5}
+
+
+# ------------------------------------------------------------ configuration
+
+
+def test_thresholds_default_when_nothing_is_configured():
+    assert hc.load_thresholds({}) == {"cpu": 80, "memory": 85, "disk": 90}
+
+
+def test_thresholds_can_be_overridden_per_metric():
+    env = {"CPU_THRESHOLD": "50", "DISK_THRESHOLD": " 95.5 "}
+    assert hc.load_thresholds(env) == {"cpu": 50, "memory": 85, "disk": 95.5}
+
+
+def test_empty_threshold_setting_falls_back_to_the_default():
+    assert hc.load_thresholds({"MEMORY_THRESHOLD": ""})["memory"] == 85
+
+
+@pytest.mark.parametrize("bad", ["abc", "-1", "100.5", "nan", "inf", "80%"])
+def test_invalid_threshold_is_rejected_and_names_the_setting(bad):
+    with pytest.raises(hc.ConfigError, match="CPU_THRESHOLD"):
+        hc.load_thresholds({"CPU_THRESHOLD": bad})
+
+
+@pytest.mark.parametrize("edge", ["0", "100"])
+def test_threshold_range_includes_both_ends(edge):
+    assert hc.load_thresholds({"DISK_THRESHOLD": edge})["disk"] == float(edge)
+
+
+def test_run_health_check_uses_thresholds_from_the_environment(monkeypatch):
+    channel = FakeChannel("Slack")
+    monkeypatch.setenv("CPU_THRESHOLD", "50")
+
+    result = hc.run_health_check(
+        metrics_source=lambda: metrics(cpu=60), notifiers=[channel.notifier], now=lambda: NOW
+    )
+
+    assert [b.metric for b in result.breaches] == ["cpu"]
+    assert "High CPU usage: 60% (threshold: 50%)" in channel.sent[0][1]
+
+
+def test_fractional_thresholds_are_described_without_padding():
+    assert hc.Breach("cpu", 76.0, 75.5).describe() == "High CPU usage: 76.0% (threshold: 75.5%)"
+    assert hc.Breach("cpu", 76.0, 75.0).describe() == "High CPU usage: 76.0% (threshold: 75%)"
+
+
+def test_main_reports_invalid_configuration_and_exits_with_status_2(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(hc, "CONFIG_FILE", tmp_path / "no-such-config")
+    monkeypatch.setattr(hc, "LOG_FILE", tmp_path / "logs" / "health_monitor.log")
+    monkeypatch.setenv("CPU_THRESHOLD", "abc")
+
+    with pytest.raises(SystemExit) as excinfo:
+        hc.main()
+
+    assert excinfo.value.code == 2
+    assert "CPU_THRESHOLD" in capsys.readouterr().err
 
 
 # ------------------------------------------------------------------ senders

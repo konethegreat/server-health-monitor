@@ -11,6 +11,7 @@ import datetime
 import logging
 import os
 import smtplib
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -27,14 +28,42 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_FILE = PROJECT_ROOT / "config" / "alert_config"
 LOG_FILE = PROJECT_ROOT / "logs" / "health_monitor.log"
 
-# Thresholds in percent used (customize as needed).
-# An alert is raised when a reading is greater than its threshold.
+# Default thresholds in percent used. An alert is raised when a reading is
+# greater than its threshold. Override them with CPU_THRESHOLD,
+# MEMORY_THRESHOLD and DISK_THRESHOLD (see load_thresholds).
 DEFAULT_THRESHOLDS = {"cpu": 80, "memory": 85, "disk": 90}
 
 METRICS = ("cpu", "memory", "disk")
 LABELS = {"cpu": "CPU", "memory": "Memory", "disk": "Disk"}
 
 ALERT_SUBJECT = "SERVER HEALTH ALERT"
+
+class ConfigError(ValueError):
+    """An invalid setting in the environment or in config/alert_config"""
+
+def _percentage(env, name, default):
+    """Read a 0-100 setting; an unset or empty value gives the default"""
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ConfigError(f"{name} must be a number between 0 and 100, got {raw!r}") from None
+    if not 0 <= value <= 100:
+        raise ConfigError(f"{name} must be between 0 and 100, got {raw!r}")
+    return value
+
+def load_thresholds(environ=None):
+    """Thresholds in percent from CPU_THRESHOLD, MEMORY_THRESHOLD and DISK_THRESHOLD.
+
+    Settings that are not set keep their value from DEFAULT_THRESHOLDS.
+    """
+    env = os.environ if environ is None else environ
+    return {
+        metric: _percentage(env, f"{metric.upper()}_THRESHOLD", DEFAULT_THRESHOLDS[metric])
+        for metric in METRICS
+    }
 
 # ======================
 # HEALTH CHECK FUNCTIONS
@@ -76,7 +105,7 @@ class Breach:
     threshold: float
 
     def describe(self):
-        return f"High {LABELS[self.metric]} usage: {self.value}% (threshold: {self.threshold}%)"
+        return f"High {LABELS[self.metric]} usage: {self.value}% (threshold: {self.threshold:g}%)"
 
 def evaluate_thresholds(metrics, thresholds):
     """Return a Breach for every metric whose value is greater than its threshold.
@@ -189,13 +218,13 @@ def run_health_check(metrics_source=collect_metrics, notifiers=None, thresholds=
 
     metrics_source: callable returning {"cpu": ..., "memory": ..., "disk": ...} (percent)
     notifiers: list of Notifier; defaults to the channels configured in the environment
-    thresholds: mapping of metric name to threshold; defaults to DEFAULT_THRESHOLDS
+    thresholds: mapping of metric name to threshold; defaults to load_thresholds()
     now: callable returning the current datetime
     """
     timestamp = now().strftime("%Y-%m-%d %H:%M:%S")
     logging.info(f"Starting health check at {timestamp}")
 
-    thresholds = DEFAULT_THRESHOLDS if thresholds is None else thresholds
+    thresholds = load_thresholds() if thresholds is None else thresholds
     notifiers = build_notifiers() if notifiers is None else notifiers
 
     metrics = metrics_source()
@@ -234,6 +263,10 @@ def main():
 
     try:
         run_health_check()
+    except ConfigError as e:
+        logging.critical(f"Invalid configuration: {e}")
+        print(f"Configuration error: {e}", file=sys.stderr)
+        sys.exit(2)
     except Exception as e:
         logging.critical(f"Health check script failed: {str(e)}")
 
