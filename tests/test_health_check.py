@@ -22,6 +22,7 @@ import health_check as hc
 
 DEFAULTS = hc.DEFAULT_THRESHOLDS  # cpu 80, memory 85, disk 90 (percent)
 NOW = datetime.datetime(2026, 10, 3, 12, 0, 0)
+HOST = "test-host"
 
 # The real senders, kept before the autouse fixture below replaces them. Only the
 # loopback timeout tests use them.
@@ -84,6 +85,7 @@ def run(channels, **readings):
         metrics_source=lambda: metrics(**readings),
         notifiers=[channel.notifier for channel in channels],
         now=lambda: NOW,
+        hostname=lambda: HOST,
     )
 
 
@@ -156,11 +158,23 @@ def test_breach_sends_one_alert_per_channel_listing_every_issue():
     for channel in (slack, email):
         assert len(channel.sent) == 1  # one message for the whole run, not one per breach
         subject, body = channel.sent[0]
-        assert subject == "SERVER HEALTH ALERT"
+        assert subject == "SERVER HEALTH ALERT: test-host"
+        assert "Host: test-host" in body
         assert "Time: 2026-10-03 12:00:00" in body
         assert "High CPU usage: 91.5% (threshold: 80%)" in body
         assert "High Disk usage: 95% (threshold: 90%)" in body
         assert "Memory" not in body
+
+
+def test_alert_names_this_machine_by_default(monkeypatch):
+    monkeypatch.setattr(hc.socket, "gethostname", lambda: "box-7")
+    channel = FakeChannel("Slack")
+
+    hc.run_health_check(metrics_source=lambda: metrics(cpu=95), notifiers=[channel.notifier], now=lambda: NOW)
+
+    subject, body = channel.sent[0]
+    assert subject == "SERVER HEALTH ALERT: box-7"
+    assert "Host: box-7" in body
 
 
 def test_failed_channel_is_reported_and_does_not_block_the_others(caplog):
@@ -204,6 +218,44 @@ def test_only_runs_above_a_threshold_alert():
     assert len(channel.sent) == 2
     assert "High CPU usage" in channel.sent[0][1]
     assert "High Memory usage" in channel.sent[1][1]
+
+
+def test_evaluation_skips_a_metric_that_was_not_read():
+    assert hc.evaluate_thresholds({"cpu": 95, "memory": 20}, DEFAULTS) == [hc.Breach("cpu", 95, 80)]
+
+
+def test_a_breach_is_still_alerted_when_another_reading_is_missing(caplog):
+    channel = FakeChannel("Slack")
+    with caplog.at_level(logging.INFO):
+        result = hc.run_health_check(
+            metrics_source=lambda: {"cpu": 95, "memory": 20},  # the disk reading failed
+            notifiers=[channel.notifier],
+            now=lambda: NOW,
+        )
+
+    assert [breach.metric for breach in result.breaches] == ["cpu"]
+    assert result.unreadable == ["disk"]
+    assert not result.healthy
+    assert len(channel.sent) == 1 and "High CPU usage" in channel.sent[0][1]
+    assert "Not checked because the reading failed: Disk" in caplog.text
+    assert "All systems nominal" not in caplog.text
+
+
+def test_a_missing_reading_without_a_breach_is_not_reported_as_nominal(caplog):
+    channel = FakeChannel("Slack")
+    with caplog.at_level(logging.INFO):
+        result = hc.run_health_check(
+            metrics_source=lambda: {"cpu": 10, "disk": 30},  # the memory reading failed
+            notifiers=[channel.notifier],
+            now=lambda: NOW,
+        )
+
+    assert result.breaches == []
+    assert result.unreadable == ["memory"]
+    assert not result.healthy
+    assert channel.sent == []  # nothing is above a threshold, so no alert; the failure is logged
+    assert "Not checked because the reading failed: Memory" in caplog.text
+    assert "All systems nominal" not in caplog.text
 
 
 # ------------------------------------------------------- metric collection
@@ -259,6 +311,20 @@ def test_explicit_disk_path_wins_over_the_environment(monkeypatch):
     assert paths == ["/srv"]
 
 
+def test_a_reading_that_fails_is_left_out_and_logged_while_the_others_are_still_read(monkeypatch, caplog):
+    stub_psutil(monkeypatch, cpu=33.0, memory=61.5)
+
+    def unreadable(path):
+        raise OSError("no such path")
+
+    monkeypatch.setattr(hc.psutil, "disk_usage", unreadable)
+    with caplog.at_level(logging.ERROR):
+        readings = hc.collect_metrics()
+
+    assert readings == {"cpu": 33.0, "memory": 61.5}
+    assert "Could not read Disk usage: OSError: no such path" in caplog.text
+
+
 # ------------------------------------------------------------ configuration
 
 
@@ -303,9 +369,14 @@ def test_fractional_thresholds_are_described_without_padding():
     assert hc.Breach("cpu", 76.0, 75.0).describe() == "High CPU usage: 76.0% (threshold: 75%)"
 
 
-def test_main_reports_invalid_configuration_and_exits_with_status_2(monkeypatch, tmp_path, capsys):
+@pytest.fixture
+def isolated_main(monkeypatch, tmp_path):
+    """Let main() run without touching the repository: no config file, logs in a temp folder."""
     monkeypatch.setattr(hc, "CONFIG_FILE", tmp_path / "no-such-config")
     monkeypatch.setattr(hc, "LOG_FILE", tmp_path / "logs" / "health_monitor.log")
+
+
+def test_main_reports_invalid_configuration_and_exits_with_status_2(isolated_main, monkeypatch, capsys):
     monkeypatch.setenv("CPU_THRESHOLD", "abc")
 
     with pytest.raises(SystemExit) as excinfo:
@@ -313,6 +384,42 @@ def test_main_reports_invalid_configuration_and_exits_with_status_2(monkeypatch,
 
     assert excinfo.value.code == 2
     assert "CPU_THRESHOLD" in capsys.readouterr().err
+
+
+def test_main_exits_with_status_1_and_prints_the_reason_when_the_check_fails(isolated_main, monkeypatch, capsys):
+    def crash():
+        raise RuntimeError("psutil exploded")
+
+    monkeypatch.setattr(hc, "run_health_check", crash)
+
+    with pytest.raises(SystemExit) as excinfo:
+        hc.main()
+
+    assert excinfo.value.code == 1
+    assert "RuntimeError: psutil exploded" in capsys.readouterr().err
+
+
+def test_main_exits_with_status_1_when_a_reading_could_not_be_taken(isolated_main, monkeypatch, capsys):
+    incomplete = hc.HealthResult(metrics={"cpu": 1, "memory": 2}, breaches=[], unreadable=["disk"])
+    monkeypatch.setattr(hc, "run_health_check", lambda: incomplete)
+
+    with pytest.raises(SystemExit) as excinfo:
+        hc.main()
+
+    assert excinfo.value.code == 1
+    assert "could not read: Disk" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("breaches", [[], [hc.Breach("cpu", 95, 80)]], ids=["healthy", "threshold exceeded"])
+def test_main_returns_normally_and_stays_silent_when_the_check_ran(breaches, isolated_main, monkeypatch, capsys):
+    """Exit status 0 means the check ran; a threshold being exceeded is reported by the alerts, not the status."""
+    ran = hc.HealthResult(metrics={"cpu": 95, "memory": 2, "disk": 3}, breaches=breaches)
+    monkeypatch.setattr(hc, "run_health_check", lambda: ran)
+
+    hc.main()  # no SystemExit
+
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
 
 
 # ------------------------------------------- notification configuration
@@ -603,6 +710,23 @@ def test_email_with_non_ascii_text_is_sent_and_reads_back_unchanged(monkeypatch)
 
     assert message["Subject"] == subject
     assert message.get_content().strip() == body
+
+
+def test_alert_for_a_host_with_a_non_ascii_name_is_emailed_intact(monkeypatch):
+    """The host name goes into the subject and the body, so it has to survive the trip through SMTP."""
+    FakeSMTP.instances = []
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    (notifier,) = hc.build_notifiers(EMAIL_ENV)
+    host = "k\N{LATIN SMALL LETTER O WITH DIAERESIS}ln-01"
+
+    result = hc.run_health_check(
+        metrics_source=lambda: metrics(cpu=95), notifiers=[notifier], now=lambda: NOW, hostname=lambda: host
+    )
+
+    assert result.deliveries == {"Email": True}
+    message = delivered_message(FakeSMTP.instances[0])
+    assert message["Subject"] == f"SERVER HEALTH ALERT: {host}"
+    assert f"Host: {host}" in message.get_content()
 
 
 def test_every_comma_separated_receiver_is_sent_the_alert(monkeypatch):

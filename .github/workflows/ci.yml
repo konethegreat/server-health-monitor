@@ -30,3 +30,18 @@ jobs:
 
       - name: Run tests
         run: python -m pytest
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the image
+        run: docker build -f docker/Dockerfile -t server-health-monitor .
+
+      - name: Run one health check in the container
+        run: |
+          docker run --rm --entrypoint sh server-health-monitor -c \
+            'python scripts/health_check.py && grep -q "Disk usage" logs/health_monitor.log'

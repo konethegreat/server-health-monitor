@@ -11,6 +11,7 @@ import datetime
 import logging
 import os
 import smtplib
+import socket
 import sys
 from dataclasses import dataclass, field
 from email.message import EmailMessage
@@ -100,9 +101,18 @@ def collect_metrics(disk_path=None):
     """Read the current usage (percent) of every monitored resource.
 
     The disk reading covers disk_path, else DISK_PATH from the environment, else "/".
+    A resource that cannot be read is left out of the result and the reason is
+    logged, so one failing reading does not hide a problem found in another.
     """
     disk_path = disk_path or os.environ.get("DISK_PATH") or "/"
-    return {"cpu": check_cpu(), "memory": check_memory(), "disk": check_disk(disk_path)}
+    readers = {"cpu": check_cpu, "memory": check_memory, "disk": lambda: check_disk(disk_path)}
+    metrics = {}
+    for name, read in readers.items():
+        try:
+            metrics[name] = read()
+        except Exception as error:
+            logging.error(f"Could not read {LABELS[name]} usage: {type(error).__name__}: {error}")
+    return metrics
 
 # ======================
 # THRESHOLD EVALUATION
@@ -122,12 +132,13 @@ def evaluate_thresholds(metrics, thresholds):
     """Return a Breach for every metric whose value is greater than its threshold.
 
     Pure function (no I/O), so it can be tested with simulated readings.
-    A value exactly equal to its threshold is not a breach.
+    A value exactly equal to its threshold is not a breach. A metric that is
+    missing from `metrics` (it could not be read) is skipped.
     """
     return [
         Breach(name, metrics[name], thresholds[name])
         for name in METRICS
-        if metrics[name] > thresholds[name]
+        if name in metrics and metrics[name] > thresholds[name]
     ]
 
 # ======================
@@ -257,18 +268,22 @@ class HealthResult:
     metrics: dict
     breaches: list
     deliveries: dict = field(default_factory=dict)
+    unreadable: list = field(default_factory=list)  # metrics that could not be read
 
     @property
     def healthy(self):
-        return not self.breaches
+        """True only if every metric was read and none is above its threshold"""
+        return not self.breaches and not self.unreadable
 
-def run_health_check(metrics_source=collect_metrics, notifiers=None, thresholds=None, now=datetime.datetime.now):
+def run_health_check(metrics_source=collect_metrics, notifiers=None, thresholds=None, now=datetime.datetime.now, hostname=None):
     """Run all health checks and trigger alerts if needed.
 
-    metrics_source: callable returning {"cpu": ..., "memory": ..., "disk": ...} (percent)
+    metrics_source: callable returning {"cpu": ..., "memory": ..., "disk": ...} (percent);
+        a metric that could not be read is left out
     notifiers: list of Notifier; defaults to the channels configured in the environment
     thresholds: mapping of metric name to threshold; defaults to load_thresholds()
     now: callable returning the current datetime
+    hostname: callable returning the name of this machine; defaults to socket.gethostname
     """
     timestamp = now().strftime("%Y-%m-%d %H:%M:%S")
     logging.info(f"Starting health check at {timestamp}")
@@ -278,14 +293,16 @@ def run_health_check(metrics_source=collect_metrics, notifiers=None, thresholds=
 
     metrics = metrics_source()
     breaches = evaluate_thresholds(metrics, thresholds)
-    result = HealthResult(metrics=metrics, breaches=breaches)
+    unreadable = [name for name in METRICS if name not in metrics]
+    result = HealthResult(metrics=metrics, breaches=breaches, unreadable=unreadable)
 
     # Send alerts if issues found
     if breaches:
+        host = (hostname or socket.gethostname)()
         alert_message = "\n".join(breach.describe() for breach in breaches)
-        full_message = f"Server Health Alert!\nTime: {timestamp}\n\n{alert_message}"
+        full_message = f"Server Health Alert!\nHost: {host}\nTime: {timestamp}\n\n{alert_message}"
 
-        result.deliveries = deliver(notifiers, ALERT_SUBJECT, full_message)
+        result.deliveries = deliver(notifiers, f"{ALERT_SUBJECT}: {host}", full_message)
         if not notifiers:
             logging.warning(
                 "No alert channel is configured, so no alert was sent "
@@ -293,7 +310,10 @@ def run_health_check(metrics_source=collect_metrics, notifiers=None, thresholds=
             )
 
         logging.warning(f"Health issues detected: {alert_message}")
-    else:
+
+    if unreadable:
+        logging.error(f"Not checked because the reading failed: {', '.join(LABELS[name] for name in unreadable)}")
+    if result.healthy:
         logging.info("All systems nominal")
 
     return result
@@ -303,7 +323,13 @@ def run_health_check(metrics_source=collect_metrics, notifiers=None, thresholds=
 # ======================
 
 def main():
-    """Load the configuration, set up logging and run one health check"""
+    """Load the configuration, set up logging and run one health check.
+
+    Exit status: 0 when the check ran, even if a threshold was exceeded (the
+    alerts are the signal for that); 1 when the check failed or a reading could
+    not be taken; 2 when the configuration is invalid. Nothing is printed
+    unless something went wrong, so a scheduler only reports real problems.
+    """
     load_dotenv(CONFIG_FILE)
 
     # Create log directory if it doesn't exist (works on Windows and Linux)
@@ -316,13 +342,20 @@ def main():
     logging.info("Logging system initialized successfully")
 
     try:
-        run_health_check()
+        result = run_health_check()
     except ConfigError as e:
         logging.critical(f"Invalid configuration: {e}")
         print(f"Configuration error: {e}", file=sys.stderr)
         sys.exit(2)
     except Exception as e:
         logging.critical(f"Health check script failed: {str(e)}")
+        print(f"Health check failed: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if result.unreadable:
+        names = ", ".join(LABELS[name] for name in result.unreadable)
+        print(f"Health check incomplete, could not read: {names} (see {LOG_FILE})", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
