@@ -574,3 +574,61 @@ def test_email_alert_connects_secures_logs_in_and_sends(monkeypatch):
     kind, sender, receiver, message = smtp.calls[2]
     assert (kind, sender, receiver) == ("sendmail", "monitor@example.invalid", "admin@example.invalid")
     assert message.startswith("Subject: SUBJECT") and message.endswith("BODY")
+
+
+# ------------------------------------------- failures are logged without secrets
+
+SECRET = "SYNTHETICSECRET0123"
+SECRET_URL = f"https://example.invalid/services/T000/B000/{SECRET}"
+
+
+def deliver_slack(env, caplog):
+    """Deliver through the real Slack notifier and return the log text it produced."""
+    (notifier,) = hc.build_notifiers(env)
+    with caplog.at_level(logging.INFO):
+        assert hc.deliver([notifier], "SUBJECT", "BODY") == {"Slack": False}
+    return caplog.text
+
+
+def test_http_error_is_logged_with_its_status_but_without_the_webhook_url(monkeypatch, caplog):
+    response = requests.Response()
+    response.status_code = 404
+    response.reason = "Not Found"
+    response.url = SECRET_URL  # raise_for_status() puts this URL into the exception message
+    monkeypatch.setattr(requests, "post", lambda url, **kw: response)
+
+    log = deliver_slack({"SLACK_WEBHOOK_URL": SECRET_URL}, caplog)
+
+    assert "Failed to send Slack alert: HTTPError (HTTP 404)" in log
+    assert SECRET not in log
+
+
+@pytest.mark.parametrize("error_type", [requests.ConnectionError, requests.Timeout])
+def test_connection_failures_are_logged_without_the_webhook_url(error_type, monkeypatch, caplog):
+    def fail(url, **kwargs):
+        raise error_type(f"Max retries exceeded with url: /services/T000/B000/{SECRET}")
+
+    monkeypatch.setattr(requests, "post", fail)
+
+    log = deliver_slack({"SLACK_WEBHOOK_URL": SECRET_URL}, caplog)
+
+    assert f"Failed to send Slack alert: {error_type.__name__}" in log
+    assert SECRET not in log
+
+
+def test_smtp_failure_is_logged_without_server_text_or_credentials(monkeypatch, caplog):
+    class RefusingSMTP(FakeSMTP):
+        def login(self, user, password):
+            raise smtplib.SMTPAuthenticationError(
+                535, f"Username monitor@example.invalid and password {EMAIL_ENV['EMAIL_PASSWORD']} not accepted".encode()
+            )
+
+    monkeypatch.setattr(smtplib, "SMTP", RefusingSMTP)
+    (notifier,) = hc.build_notifiers(EMAIL_ENV)
+
+    with caplog.at_level(logging.INFO):
+        assert hc.deliver([notifier], "SUBJECT", "BODY") == {"Email": False}
+
+    assert "Failed to send Email alert: SMTPAuthenticationError (SMTP 535)" in caplog.text
+    assert EMAIL_ENV["EMAIL_PASSWORD"] not in caplog.text
+    assert "monitor@example.invalid" not in caplog.text
