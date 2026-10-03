@@ -82,16 +82,20 @@ def check_memory():
     logging.info(f"Memory usage: {memory_percent}%")
     return memory_percent
 
-def check_disk():
-    """Check disk usage for root partition"""
-    disk = psutil.disk_usage('/')
+def check_disk(path="/"):
+    """Check disk usage of the filesystem at path (default: root partition) and return percentage"""
+    disk = psutil.disk_usage(path)
     disk_percent = disk.percent
-    logging.info(f"Disk usage: {disk_percent}%")
+    logging.info(f"Disk usage ({path}): {disk_percent}%")
     return disk_percent
 
-def collect_metrics():
-    """Read the current usage (percent) of every monitored resource"""
-    return {"cpu": check_cpu(), "memory": check_memory(), "disk": check_disk()}
+def collect_metrics(disk_path=None):
+    """Read the current usage (percent) of every monitored resource.
+
+    The disk reading covers disk_path, else DISK_PATH from the environment, else "/".
+    """
+    disk_path = disk_path or os.environ.get("DISK_PATH") or "/"
+    return {"cpu": check_cpu(), "memory": check_memory(), "disk": check_disk(disk_path)}
 
 # ======================
 # THRESHOLD EVALUATION
