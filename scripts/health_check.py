@@ -210,6 +210,22 @@ def build_notifiers(environ=None):
         notifiers.append(Notifier("Email", lambda subject, body: send_email_alert(email_config, subject, body)))
     return notifiers
 
+def describe_error(error):
+    """Describe a delivery failure for the log without echoing the exception message.
+
+    requests puts the full request URL, which for Slack is the secret webhook
+    URL, into the message of most of its exceptions, and SMTP servers echo text
+    we do not control. So only the exception type and a status code are logged.
+    """
+    description = type(error).__name__
+    http_status = getattr(getattr(error, "response", None), "status_code", None)
+    smtp_code = getattr(error, "smtp_code", None)
+    if http_status is not None:
+        description += f" (HTTP {http_status})"
+    elif smtp_code is not None:
+        description += f" (SMTP {smtp_code})"
+    return description
+
 def deliver(notifiers, subject, body):
     """Send an alert through every notifier; one failing channel never blocks the others.
 
@@ -220,7 +236,7 @@ def deliver(notifiers, subject, body):
         try:
             notifier.send(subject, body)
         except Exception as e:
-            logging.error(f"Failed to send {notifier.name} alert: {str(e)}")
+            logging.error(f"Failed to send {notifier.name} alert: {describe_error(e)}")
             results[notifier.name] = False
         else:
             logging.info(f"{notifier.name} alert sent successfully")
