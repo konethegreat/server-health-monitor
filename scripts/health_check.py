@@ -13,6 +13,8 @@ import os
 import smtplib
 import sys
 from dataclasses import dataclass, field
+from email.message import EmailMessage
+from email.utils import formatdate
 from pathlib import Path
 from typing import Callable
 
@@ -150,15 +152,17 @@ def send_slack_alert(webhook_url, message):
 
 def send_email_alert(email_config, subject, body):
     """Send email alert using SMTP"""
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = email_config["sender_email"]
+    message["To"] = email_config["receiver_email"]
+    message["Date"] = formatdate(localtime=True)
+    message.set_content(body)
+
     with smtplib.SMTP(email_config["smtp_server"], email_config["smtp_port"], timeout=NOTIFY_TIMEOUT_SECONDS) as server:
         server.starttls()
         server.login(email_config["sender_email"], email_config["password"])
-        message = f"Subject: {subject}\n\n{body}"
-        server.sendmail(
-            email_config["sender_email"],
-            email_config["receiver_email"],
-            message
-        )
+        server.send_message(message)
 
 EMAIL_REQUIRED = ("SENDER_EMAIL", "RECEIVER_EMAIL", "EMAIL_PASSWORD")
 

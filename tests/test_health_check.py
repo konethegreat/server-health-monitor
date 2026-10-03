@@ -5,6 +5,8 @@ depend on the machine's real load and nothing touches the network.
 """
 
 import datetime
+import email.policy
+import email.utils
 import logging
 import pathlib
 import smtplib
@@ -443,19 +445,36 @@ def test_slack_alert_raises_when_slack_rejects_the_request(monkeypatch):
         hc.send_slack_alert("https://example.invalid/hook", "message")
 
 
-class FakeSMTP:
+EMAIL_CONFIG = {
+    "smtp_server": "smtp.example.invalid",
+    "smtp_port": 587,
+    "sender_email": "monitor@example.invalid",
+    "receiver_email": "admin@example.invalid",
+    "password": "not-a-real-password",
+}
+
+
+class FakeSMTP(REAL_SMTP):
+    """An SMTP connection that never reaches a network.
+
+    It subclasses the real class so that send_message() runs the standard library's
+    own message flattening and recipient handling. Only the calls that would talk
+    to a server are replaced; sendmail() records the bytes that would go on the wire.
+    """
+
     instances = []
 
-    def __init__(self, server, port, **kwargs):
+    def __init__(self, server, port, **kwargs):  # no super().__init__(): that would connect
         self.server, self.port, self.kwargs = server, port, kwargs
+        self.esmtp_features = {}
         self.calls = []
         FakeSMTP.instances.append(self)
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
+    def __exit__(self, *exc):  # the real one sends QUIT
         return False
+
+    def ehlo_or_helo_if_needed(self):
+        pass
 
     def starttls(self):
         self.calls.append("starttls")
@@ -463,8 +482,25 @@ class FakeSMTP:
     def login(self, user, password):
         self.calls.append(("login", user))
 
-    def sendmail(self, sender, receiver, message):
-        self.calls.append(("sendmail", sender, receiver, message))
+    def sendmail(self, from_addr, to_addrs, msg, mail_options=(), rcpt_options=()):
+        if isinstance(msg, str):  # like the real sendmail(), which encodes text as ASCII
+            msg = msg.encode("ascii")
+        self.calls.append(("sendmail", from_addr, to_addrs, msg))
+
+
+def send_through_fake_smtp(monkeypatch, config, subject="SUBJECT", body="BODY"):
+    """Send one email through send_email_alert() and return the FakeSMTP connection it used."""
+    FakeSMTP.instances = []
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    hc.send_email_alert(config, subject, body)
+    (smtp,) = FakeSMTP.instances
+    return smtp
+
+
+def delivered_message(smtp):
+    """The message the server would receive, parsed back from the bytes handed to sendmail()."""
+    *_, raw = smtp.calls[-1]
+    return email.message_from_bytes(raw, policy=email.policy.default)
 
 
 def test_slack_request_has_a_timeout(monkeypatch):
@@ -478,19 +514,9 @@ def test_slack_request_has_a_timeout(monkeypatch):
 
 
 def test_smtp_connection_has_a_timeout(monkeypatch):
-    FakeSMTP.instances = []
-    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
-    config = {
-        "smtp_server": "smtp.example.invalid",
-        "smtp_port": 587,
-        "sender_email": "monitor@example.invalid",
-        "receiver_email": "admin@example.invalid",
-        "password": "not-a-real-password",
-    }
+    smtp = send_through_fake_smtp(monkeypatch, EMAIL_CONFIG)
 
-    hc.send_email_alert(config, "SUBJECT", "BODY")
-
-    assert FakeSMTP.instances[0].kwargs["timeout"] == hc.NOTIFY_TIMEOUT_SECONDS
+    assert smtp.kwargs["timeout"] == hc.NOTIFY_TIMEOUT_SECONDS
 
 
 @pytest.fixture
@@ -541,13 +567,7 @@ def test_slack_alert_gives_up_when_the_server_never_answers(silent_server):
 
 
 def test_email_alert_gives_up_when_the_server_never_answers(silent_server):
-    config = {
-        "smtp_server": "127.0.0.1",
-        "smtp_port": silent_server,
-        "sender_email": "monitor@example.invalid",
-        "receiver_email": "admin@example.invalid",
-        "password": "not-a-real-password",
-    }
+    config = {**EMAIL_CONFIG, "smtp_server": "127.0.0.1", "smtp_port": silent_server}
     started = time.monotonic()
     error = call_with_deadline(lambda: hc.send_email_alert(config, "SUBJECT", "BODY"))
     assert isinstance(error, OSError)  # smtplib.SMTPServerDisconnected is an OSError
@@ -555,25 +575,43 @@ def test_email_alert_gives_up_when_the_server_never_answers(silent_server):
 
 
 def test_email_alert_connects_secures_logs_in_and_sends(monkeypatch):
-    FakeSMTP.instances = []
-    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
-    config = {
-        "smtp_server": "smtp.example.invalid",
-        "smtp_port": 587,
-        "sender_email": "monitor@example.invalid",
-        "receiver_email": "admin@example.invalid",
-        "password": "not-a-real-password",
-    }
+    smtp = send_through_fake_smtp(monkeypatch, EMAIL_CONFIG)
 
-    hc.send_email_alert(config, "SUBJECT", "BODY")
-
-    (smtp,) = FakeSMTP.instances
     assert (smtp.server, smtp.port) == ("smtp.example.invalid", 587)
     assert smtp.calls[0] == "starttls"  # TLS before credentials are sent
     assert smtp.calls[1] == ("login", "monitor@example.invalid")
-    kind, sender, receiver, message = smtp.calls[2]
-    assert (kind, sender, receiver) == ("sendmail", "monitor@example.invalid", "admin@example.invalid")
-    assert message.startswith("Subject: SUBJECT") and message.endswith("BODY")
+    kind, sender, recipients, _ = smtp.calls[2]
+    assert (kind, sender, recipients) == ("sendmail", "monitor@example.invalid", ["admin@example.invalid"])
+    assert len(smtp.calls) == 3
+
+
+def test_email_has_the_subject_sender_recipient_date_and_body(monkeypatch):
+    message = delivered_message(send_through_fake_smtp(monkeypatch, EMAIL_CONFIG))
+
+    assert message["Subject"] == "SUBJECT"
+    assert message["From"] == "monitor@example.invalid"
+    assert message["To"] == "admin@example.invalid"
+    assert email.utils.parsedate_to_datetime(message["Date"])  # a valid Date header
+    assert message.get_content().strip() == "BODY"
+
+
+def test_email_with_non_ascii_text_is_sent_and_reads_back_unchanged(monkeypatch):
+    subject = "ALERT: Zo\u00eb's server"
+    body = "Disk at 95% on k\u00f6ln-01 \u2013 check it"
+
+    message = delivered_message(send_through_fake_smtp(monkeypatch, EMAIL_CONFIG, subject, body))
+
+    assert message["Subject"] == subject
+    assert message.get_content().strip() == body
+
+
+def test_every_comma_separated_receiver_is_sent_the_alert(monkeypatch):
+    config = {**EMAIL_CONFIG, "receiver_email": "admin@example.invalid, oncall@example.invalid"}
+
+    smtp = send_through_fake_smtp(monkeypatch, config)
+
+    _, _, recipients, _ = smtp.calls[-1]
+    assert recipients == ["admin@example.invalid", "oncall@example.invalid"]
 
 
 # ------------------------------------------- failures are logged without secrets
