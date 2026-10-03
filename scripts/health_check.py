@@ -261,6 +261,11 @@ def run_health_check(metrics_source=collect_metrics, notifiers=None, thresholds=
         full_message = f"Server Health Alert!\nTime: {timestamp}\n\n{alert_message}"
 
         result.deliveries = deliver(notifiers, ALERT_SUBJECT, full_message)
+        if not notifiers:
+            logging.warning(
+                "No alert channel is configured, so no alert was sent "
+                "(set SLACK_WEBHOOK_URL and/or the email settings)"
+            )
 
         logging.warning(f"Health issues detected: {alert_message}")
     else:

@@ -160,6 +160,15 @@ def test_failed_channel_is_reported_and_does_not_block_the_others(caplog):
     assert "Failed to send Slack alert" in caplog.text
 
 
+def test_breach_without_any_channel_warns_that_no_alert_was_sent(caplog):
+    with caplog.at_level(logging.WARNING):
+        result = run([], cpu=99)
+
+    assert not result.healthy
+    assert result.deliveries == {}
+    assert "No alert channel is configured" in caplog.text
+
+
 def test_all_channels_failing_does_not_raise():
     result = run([FakeChannel("Slack", fail=True), FakeChannel("Email", fail=True)], disk=99)
     assert result.deliveries == {"Slack": False, "Email": False}
