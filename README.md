@@ -1,35 +1,96 @@
-# server-health-monitor
-IT Automation Scripts Project: Create scripts to automate repetitive tasks (e.g., system monitoring, backups, user management). Tools: Python, PowerShell, or Bash. Example: A script to automate server health checks and send alerts via email/Slack.
-# Server Health Monitoring System
+# Server Health Monitor
 
-A professional-grade monitoring solution that checks server health metrics and sends alerts.
+A Python tool that samples CPU, memory, and disk usage, compares them with
+configured thresholds, and sends a Slack or email alert when a threshold is
+exceeded. Each invocation runs one check; use a scheduler for repeated checks.
 
-## Features
-- 🖥 Real-time CPU, memory, and disk monitoring
-- ⚠️ Automated Slack and email alerts
-- 📝 Comprehensive logging system
-- 🐳 Docker container support
+[![Checks](https://github.com/konethegreat/server-health-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/konethegreat/server-health-monitor/actions/workflows/ci.yml)
 
-## Setup
-1. `git clone https://github.com/your-username/server-health-monitor.git`
-2. `cd server-health-monitor`
-3. `pip install -r requirements.txt`
-4. Configure alert settings in `config/alert_config`
-5. Run with `python scripts/health_check.py`
+## Install and run
 
-## Portfolio Value
-This project demonstrates:
-- IT automation skills
-- Python scripting proficiency
-- Alerting system implementation
-- Docker containerization
-- Professional code documentation
+Use Python 3.10 or later on Windows or Linux:
 
-## 🚨 Common Windows Issue: Log Path Error
+```bash
+git clone https://github.com/konethegreat/server-health-monitor.git
+cd server-health-monitor
+python -m venv .venv
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+# Linux/macOS: source .venv/bin/activate
+python -m pip install -r requirements.txt
+python scripts/health_check.py
+```
 
-If you see `FileNotFoundError: [Errno 2] No such file or directory: 'C:\\var\\log\\...'`:
+No alert channel is enabled until you configure it. Results are written to
+`logs/health_monitor.log`; the directory is created automatically. Read that
+file to inspect readings, threshold breaches, and delivery outcomes.
 
-1. The script uses Linux paths by default
-2. **Fix**: Update `health_check.py` with the cross-platform logging solution shown above
-3. This is already implemented in the current version
+## Configuration
 
+Copy `config/alert_config.example` to `config/alert_config` and edit the copy.
+PowerShell uses `Copy-Item config/alert_config.example config/alert_config`;
+Linux/macOS uses `cp config/alert_config.example config/alert_config`.
+Existing environment variables take precedence over the configuration file.
+
+| Variable | Default / behavior |
+| --- | --- |
+| `CPU_THRESHOLD` | 80 percent used |
+| `MEMORY_THRESHOLD` | 85 percent used |
+| `DISK_THRESHOLD` | 90 percent used |
+| `DISK_PATH` | `/`; on Windows, set a path such as `C:/` explicitly |
+| `SLACK_WEBHOOK_URL` | Unset disables Slack |
+| `SENDER_EMAIL`, `RECEIVER_EMAIL`, `EMAIL_PASSWORD` | All three are required to enable email |
+| `SMTP_SERVER`, `SMTP_PORT` | `smtp.gmail.com`, 587; SMTP uses STARTTLS |
+
+A reading must be greater than its threshold to trigger an alert. Thresholds
+must be between 0 and 100. Notification requests time out after 10 seconds;
+a failed channel does not prevent trying the other channel. Delivery failures
+are logged without the webhook URL, password, or server response text.
+
+Keep the real configuration private. It is gitignored. Follow your mail
+provider's SMTP authentication instructions when choosing a password or app
+password.
+
+## Scheduling
+
+On Linux, a cron entry can run the script every five minutes. Use absolute
+paths to the project and virtual environment:
+
+```cron
+*/5 * * * * /path/to/server-health-monitor/.venv/bin/python /path/to/server-health-monitor/scripts/health_check.py
+```
+
+On Windows, create a Task Scheduler task whose program is the virtual
+environment's `python.exe` and whose argument is the absolute path to
+`scripts/health_check.py`. Select the desired repeat interval.
+
+The tool sends an alert on every run that detects a breach. It does not yet
+deduplicate alerts, track incidents, or provide a dashboard. Check the log for
+delivery success; the process exit code is not a delivery receipt.
+
+## Docker
+
+```bash
+docker build -f docker/Dockerfile -t server-health-monitor .
+docker run --rm --env-file config/alert_config server-health-monitor
+```
+
+The container runs one sample and exits. To retain logs, mount a directory
+at `/app/logs`. Container metrics depend on the host and runtime's visibility;
+use a host installation when you need readings for a particular host disk.
+
+## Development and verification
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+Tests cover threshold boundaries, configuration, independent delivery
+failures, timeout settings, and redacted error logging with mocked services.
+A separate smoke test checks that psutil returns percentages on the current
+machine. GitHub Actions runs the checks on Windows and Linux. Mocked delivery
+tests do not prove that your Slack or SMTP credentials work.
+
+Report reproducible bugs and propose focused changes through
+[issues](https://github.com/konethegreat/server-health-monitor/issues) and pull
+requests. Never include webhook URLs, passwords, or private logs in an issue.
