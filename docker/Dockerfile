@@ -1,21 +1,17 @@
-# Use official Python base image
-FROM python:3.10-slim
+# Build from the repository root:
+#   docker build -f docker/Dockerfile -t server-health-monitor .
+FROM python:3.12-slim
 
-# Set working directory
 WORKDIR /app
 
 # Copy requirements and install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the health check script
-COPY scripts/health_check.py .
+# Same layout as the repository, so config/alert_config and logs/ mean the same
+# thing inside the container as they do in a normal checkout
+COPY scripts/ scripts/
+COPY config/alert_config.example config/
 
-# Copy configuration example
-COPY config/alert_config.example ./config/
-
-# Make script executable
-RUN chmod +x health_check.py
-
-# Run the health check script
-CMD ["python", "health_check.py"]
+# One health check per run; the container exits when it is done
+CMD ["python", "scripts/health_check.py"]
