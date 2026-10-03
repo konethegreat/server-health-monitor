@@ -206,6 +206,44 @@ def test_only_runs_above_a_threshold_alert():
     assert "High Memory usage" in channel.sent[1][1]
 
 
+def test_evaluation_skips_a_metric_that_was_not_read():
+    assert hc.evaluate_thresholds({"cpu": 95, "memory": 20}, DEFAULTS) == [hc.Breach("cpu", 95, 80)]
+
+
+def test_a_breach_is_still_alerted_when_another_reading_is_missing(caplog):
+    channel = FakeChannel("Slack")
+    with caplog.at_level(logging.INFO):
+        result = hc.run_health_check(
+            metrics_source=lambda: {"cpu": 95, "memory": 20},  # the disk reading failed
+            notifiers=[channel.notifier],
+            now=lambda: NOW,
+        )
+
+    assert [breach.metric for breach in result.breaches] == ["cpu"]
+    assert result.unreadable == ["disk"]
+    assert not result.healthy
+    assert len(channel.sent) == 1 and "High CPU usage" in channel.sent[0][1]
+    assert "Not checked because the reading failed: Disk" in caplog.text
+    assert "All systems nominal" not in caplog.text
+
+
+def test_a_missing_reading_without_a_breach_is_not_reported_as_nominal(caplog):
+    channel = FakeChannel("Slack")
+    with caplog.at_level(logging.INFO):
+        result = hc.run_health_check(
+            metrics_source=lambda: {"cpu": 10, "disk": 30},  # the memory reading failed
+            notifiers=[channel.notifier],
+            now=lambda: NOW,
+        )
+
+    assert result.breaches == []
+    assert result.unreadable == ["memory"]
+    assert not result.healthy
+    assert channel.sent == []  # nothing is above a threshold, so no alert; the failure is logged
+    assert "Not checked because the reading failed: Memory" in caplog.text
+    assert "All systems nominal" not in caplog.text
+
+
 # ------------------------------------------------------- metric collection
 
 
@@ -257,6 +295,20 @@ def test_explicit_disk_path_wins_over_the_environment(monkeypatch):
     monkeypatch.setenv("DISK_PATH", "/data")
     hc.collect_metrics(disk_path="/srv")
     assert paths == ["/srv"]
+
+
+def test_a_reading_that_fails_is_left_out_and_logged_while_the_others_are_still_read(monkeypatch, caplog):
+    stub_psutil(monkeypatch, cpu=33.0, memory=61.5)
+
+    def unreadable(path):
+        raise OSError("no such path")
+
+    monkeypatch.setattr(hc.psutil, "disk_usage", unreadable)
+    with caplog.at_level(logging.ERROR):
+        readings = hc.collect_metrics()
+
+    assert readings == {"cpu": 33.0, "memory": 61.5}
+    assert "Could not read Disk usage: OSError: no such path" in caplog.text
 
 
 # ------------------------------------------------------------ configuration
