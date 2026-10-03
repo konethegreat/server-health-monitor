@@ -2,68 +2,39 @@
 """
 Server Health Monitoring Script
 Checks CPU, memory, disk usage and sends alerts via Slack/email when thresholds are exceeded.
-Created for portfolio demonstration with proper documentation and error handling.
 
 Author: Kone Tshivhinda
 Date: 2025/08/21
 """
 
-import psutil
 import datetime
-import smtplib
-import requests
 import logging
+import os
+import smtplib
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
+
+import psutil
+import requests
+from dotenv import load_dotenv
 
 # ======================
 # CONFIGURATION SECTION
 # ======================
-from dotenv import load_dotenv
-import os
 
-# Load environment variables from config file
-load_dotenv('config/alert_config')
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_FILE = PROJECT_ROOT / "config" / "alert_config"
+LOG_FILE = PROJECT_ROOT / "logs" / "health_monitor.log"
 
-# Get configuration values (with fallbacks for development)
-# The Slack webhook URL is a secret: it is read only from the environment (or
-# config/alert_config) and has no default. Slack alerts stay off until
-# SLACK_WEBHOOK_URL is set.
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
-EMAIL_CONFIG = {
-    "smtp_server": os.getenv("SMTP_SERVER", "smtp.gmail.com"),
-    "smtp_port": int(os.getenv("SMTP_PORT", "587")),
-    "sender_email": os.getenv("SENDER_EMAIL", "dev@example.com"),
-    "receiver_email": os.getenv("RECEIVER_EMAIL", "dev@example.com"),
-    "password": os.getenv("EMAIL_PASSWORD", "DEV_PASSWORD")
-}
+# Thresholds in percent used (customize as needed).
+# An alert is raised when a reading is greater than its threshold.
+DEFAULT_THRESHOLDS = {"cpu": 80, "memory": 85, "disk": 90}
 
-# Thresholds (customize as needed)
-CPU_THRESHOLD = 80  # Percent
-MEMORY_THRESHOLD = 85  # Percent
-DISK_THRESHOLD = 90  # Percent
+METRICS = ("cpu", "memory", "disk")
+LABELS = {"cpu": "CPU", "memory": "Memory", "disk": "Disk"}
 
-
-# ======================
-# LOGGING CONFIGURATION (FIXED FOR WINDOWS)
-# ======================
-import os
-from pathlib import Path
-
-# Create logs directory in project root (works on Windows/Linux)
-PROJECT_ROOT = Path(__file__).parent.parent
-LOGS_DIR = PROJECT_ROOT / "logs"
-LOGS_DIR.mkdir(parents=True, exist_ok=True)  # Create if doesn't exist
-
-LOG_FILE = LOGS_DIR / "health_monitor.log"
-
-# Configure logging AFTER ensuring directory exists
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logging.info("✅ Logging system initialized successfully")
-# This creates a log file to track all monitoring activities [[9]]
+ALERT_SUBJECT = "SERVER HEALTH ALERT"
 
 # ======================
 # HEALTH CHECK FUNCTIONS
@@ -89,95 +60,182 @@ def check_disk():
     logging.info(f"Disk usage: {disk_percent}%")
     return disk_percent
 
+def collect_metrics():
+    """Read the current usage (percent) of every monitored resource"""
+    return {"cpu": check_cpu(), "memory": check_memory(), "disk": check_disk()}
+
+# ======================
+# THRESHOLD EVALUATION
+# ======================
+
+@dataclass(frozen=True)
+class Breach:
+    """A metric whose usage is above its threshold"""
+    metric: str
+    value: float
+    threshold: float
+
+    def describe(self):
+        return f"High {LABELS[self.metric]} usage: {self.value}% (threshold: {self.threshold}%)"
+
+def evaluate_thresholds(metrics, thresholds):
+    """Return a Breach for every metric whose value is greater than its threshold.
+
+    Pure function (no I/O), so it can be tested with simulated readings.
+    A value exactly equal to its threshold is not a breach.
+    """
+    return [
+        Breach(name, metrics[name], thresholds[name])
+        for name in METRICS
+        if metrics[name] > thresholds[name]
+    ]
+
 # ======================
 # ALERTING FUNCTIONS
 # ======================
 
-def send_slack_alert(message):
+@dataclass(frozen=True)
+class Notifier:
+    """One alert channel. send(subject, body) raises if delivery fails."""
+    name: str
+    send: Callable[[str, str], None]
+
+def send_slack_alert(webhook_url, message):
     """Send alert to Slack using webhook"""
-    if not SLACK_WEBHOOK_URL:
-        logging.info("SLACK_WEBHOOK_URL is not set; skipping Slack alert")
-        return
     payload = {
         "text": f"⚠️ SERVER ALERT ⚠️\n{message}",
         "username": "Health Monitor",
         "icon_emoji": ":warning:"
     }
-    try:
-        response = requests.post(SLACK_WEBHOOK_URL, json=payload)
-        response.raise_for_status()
-        logging.info("Slack alert sent successfully")
-    except Exception as e:
-        logging.error(f"Failed to send Slack alert: {str(e)}")
+    response = requests.post(webhook_url, json=payload)
+    response.raise_for_status()
 
-def send_email_alert(subject, body):
+def send_email_alert(email_config, subject, body):
     """Send email alert using SMTP"""
-    try:
-        with smtplib.SMTP(EMAIL_CONFIG["smtp_server"], EMAIL_CONFIG["smtp_port"]) as server:
-            server.starttls()
-            server.login(EMAIL_CONFIG["sender_email"], EMAIL_CONFIG["password"])
-            message = f"Subject: {subject}\n\n{body}"
-            server.sendmail(
-                EMAIL_CONFIG["sender_email"],
-                EMAIL_CONFIG["receiver_email"],
-                message
-            )
-        logging.info("Email alert sent successfully")
-    except Exception as e:
-        logging.error(f"Failed to send email alert: {str(e)}")
+    with smtplib.SMTP(email_config["smtp_server"], email_config["smtp_port"]) as server:
+        server.starttls()
+        server.login(email_config["sender_email"], email_config["password"])
+        message = f"Subject: {subject}\n\n{body}"
+        server.sendmail(
+            email_config["sender_email"],
+            email_config["receiver_email"],
+            message
+        )
+
+def load_email_config(environ=None):
+    """Read the SMTP settings from the environment (config/alert_config is loaded into it)"""
+    env = os.environ if environ is None else environ
+    return {
+        "smtp_server": env.get("SMTP_SERVER", "smtp.gmail.com"),
+        "smtp_port": int(env.get("SMTP_PORT", "587")),
+        "sender_email": env.get("SENDER_EMAIL", "dev@example.com"),
+        "receiver_email": env.get("RECEIVER_EMAIL", "dev@example.com"),
+        "password": env.get("EMAIL_PASSWORD", "DEV_PASSWORD"),
+    }
+
+def build_notifiers(environ=None):
+    """Create the alert channels from the environment.
+
+    The Slack webhook URL is a secret: it has no default and Slack alerts stay
+    off until SLACK_WEBHOOK_URL is set.
+    """
+    env = os.environ if environ is None else environ
+    notifiers = []
+
+    webhook_url = env.get("SLACK_WEBHOOK_URL", "")
+    if webhook_url:
+        notifiers.append(Notifier("Slack", lambda subject, body: send_slack_alert(webhook_url, body)))
+    else:
+        logging.info("SLACK_WEBHOOK_URL is not set; Slack alerts are disabled")
+
+    email_config = load_email_config(env)
+    notifiers.append(Notifier("Email", lambda subject, body: send_email_alert(email_config, subject, body)))
+    return notifiers
+
+def deliver(notifiers, subject, body):
+    """Send an alert through every notifier; one failing channel never blocks the others.
+
+    Returns {notifier name: True if it was sent, False if it raised}.
+    """
+    results = {}
+    for notifier in notifiers:
+        try:
+            notifier.send(subject, body)
+        except Exception as e:
+            logging.error(f"Failed to send {notifier.name} alert: {str(e)}")
+            results[notifier.name] = False
+        else:
+            logging.info(f"{notifier.name} alert sent successfully")
+            results[notifier.name] = True
+    return results
 
 # ======================
 # MAIN MONITORING FUNCTION
 # ======================
 
-def run_health_check():
-    """Main function to run all health checks and trigger alerts if needed"""
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+@dataclass
+class HealthResult:
+    """What one health check found and which alert channels were used"""
+    metrics: dict
+    breaches: list
+    deliveries: dict = field(default_factory=dict)
+
+    @property
+    def healthy(self):
+        return not self.breaches
+
+def run_health_check(metrics_source=collect_metrics, notifiers=None, thresholds=None, now=datetime.datetime.now):
+    """Run all health checks and trigger alerts if needed.
+
+    metrics_source: callable returning {"cpu": ..., "memory": ..., "disk": ...} (percent)
+    notifiers: list of Notifier; defaults to the channels configured in the environment
+    thresholds: mapping of metric name to threshold; defaults to DEFAULT_THRESHOLDS
+    now: callable returning the current datetime
+    """
+    timestamp = now().strftime("%Y-%m-%d %H:%M:%S")
     logging.info(f"Starting health check at {timestamp}")
-    
-    issues = []
-    
-    # Check CPU
-    cpu = check_cpu()
-    if cpu > CPU_THRESHOLD:
-        issues.append(f"High CPU usage: {cpu}% (threshold: {CPU_THRESHOLD}%)")
-    
-    # Check Memory
-    memory = check_memory()
-    if memory > MEMORY_THRESHOLD:
-        issues.append(f"High Memory usage: {memory}% (threshold: {MEMORY_THRESHOLD}%)")
-    
-    # Check Disk
-    disk = check_disk()
-    if disk > DISK_THRESHOLD:
-        issues.append(f"High Disk usage: {disk}% (threshold: {DISK_THRESHOLD}%)")
-    
+
+    thresholds = DEFAULT_THRESHOLDS if thresholds is None else thresholds
+    notifiers = build_notifiers() if notifiers is None else notifiers
+
+    metrics = metrics_source()
+    breaches = evaluate_thresholds(metrics, thresholds)
+    result = HealthResult(metrics=metrics, breaches=breaches)
+
     # Send alerts if issues found
-    if issues:
-        alert_message = "\n".join(issues)
+    if breaches:
+        alert_message = "\n".join(breach.describe() for breach in breaches)
         full_message = f"Server Health Alert!\nTime: {timestamp}\n\n{alert_message}"
-        
-        send_slack_alert(full_message)
-        
-        email_subject = "SERVER HEALTH ALERT"
-        send_email_alert(email_subject, full_message)
-        
+
+        result.deliveries = deliver(notifiers, ALERT_SUBJECT, full_message)
+
         logging.warning(f"Health issues detected: {alert_message}")
     else:
         logging.info("All systems nominal")
-    
-    return len(issues) == 0
+
+    return result
 
 # ======================
 # EXECUTION
 # ======================
 
-if __name__ == "__main__":
-    # Create log directory if it doesn't exist
-    Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
-    
+def main():
+    """Load the configuration, set up logging and run one health check"""
+    load_dotenv(CONFIG_FILE)
+
+    # Create log directory if it doesn't exist (works on Windows and Linux)
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=LOG_FILE,
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+    logging.info("Logging system initialized successfully")
+
     try:
         run_health_check()
     except Exception as e:
         logging.critical(f"Health check script failed: {str(e)}")
-        # Always handle exceptions in monitoring scripts [[3]]
+
+if __name__ == "__main__":
+    main()
