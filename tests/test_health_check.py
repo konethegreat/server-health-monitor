@@ -21,6 +21,7 @@ CONFIG_VARIABLES = (
     "CPU_THRESHOLD",
     "MEMORY_THRESHOLD",
     "DISK_THRESHOLD",
+    "DISK_PATH",
     "SLACK_WEBHOOK_URL",
     "SMTP_SERVER",
     "SMTP_PORT",
@@ -186,18 +187,54 @@ def test_only_runs_above_a_threshold_alert():
 # ------------------------------------------------------- metric collection
 
 
+def stub_psutil(monkeypatch, cpu=33.0, memory=61.5, disk=72.5):
+    """Replace the psutil readings; returns the list of paths disk_usage is asked about."""
+    paths = []
+
+    class Reading:
+        def __init__(self, percent):
+            self.percent = percent
+
+    def disk_usage(path):
+        paths.append(path)
+        return Reading(disk)
+
+    monkeypatch.setattr(hc.psutil, "cpu_percent", lambda interval=None: cpu)
+    monkeypatch.setattr(hc.psutil, "virtual_memory", lambda: Reading(memory))
+    monkeypatch.setattr(hc.psutil, "disk_usage", disk_usage)
+    return paths
+
+
 def test_collect_metrics_maps_psutil_readings(monkeypatch):
-    class Memory:
-        percent = 61.5
-
-    class Disk:
-        percent = 72.5
-
-    monkeypatch.setattr(hc.psutil, "cpu_percent", lambda interval=None: 33.0)
-    monkeypatch.setattr(hc.psutil, "virtual_memory", lambda: Memory())
-    monkeypatch.setattr(hc.psutil, "disk_usage", lambda path: Disk())
-
+    stub_psutil(monkeypatch, cpu=33.0, memory=61.5, disk=72.5)
     assert hc.collect_metrics() == {"cpu": 33.0, "memory": 61.5, "disk": 72.5}
+
+
+def test_disk_check_defaults_to_the_root_partition(monkeypatch):
+    paths = stub_psutil(monkeypatch)
+    hc.collect_metrics()
+    assert paths == ["/"]
+
+
+def test_disk_path_can_be_set_in_the_environment(monkeypatch):
+    paths = stub_psutil(monkeypatch)
+    monkeypatch.setenv("DISK_PATH", "/data")
+    hc.collect_metrics()
+    assert paths == ["/data"]
+
+
+def test_empty_disk_path_setting_falls_back_to_the_root_partition(monkeypatch):
+    paths = stub_psutil(monkeypatch)
+    monkeypatch.setenv("DISK_PATH", "")
+    hc.collect_metrics()
+    assert paths == ["/"]
+
+
+def test_explicit_disk_path_wins_over_the_environment(monkeypatch):
+    paths = stub_psutil(monkeypatch)
+    monkeypatch.setenv("DISK_PATH", "/data")
+    hc.collect_metrics(disk_path="/srv")
+    assert paths == ["/srv"]
 
 
 # ------------------------------------------------------------ configuration
