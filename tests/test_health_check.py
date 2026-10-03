@@ -8,6 +8,9 @@ import datetime
 import logging
 import pathlib
 import smtplib
+import socket
+import threading
+import time
 
 import pytest
 import requests
@@ -17,6 +20,11 @@ import health_check as hc
 
 DEFAULTS = hc.DEFAULT_THRESHOLDS  # cpu 80, memory 85, disk 90 (percent)
 NOW = datetime.datetime(2026, 10, 3, 12, 0, 0)
+
+# The real senders, kept before the autouse fixture below replaces them. Only the
+# loopback timeout tests use them.
+REAL_POST = requests.post
+REAL_SMTP = smtplib.SMTP
 EXAMPLE_CONFIG = pathlib.Path(__file__).resolve().parent.parent / "config" / "alert_config.example"
 
 # Every environment variable the monitor reads; cleared so a developer's own settings cannot leak into tests
@@ -439,7 +447,7 @@ class FakeSMTP:
     instances = []
 
     def __init__(self, server, port, **kwargs):
-        self.server, self.port = server, port
+        self.server, self.port, self.kwargs = server, port, kwargs
         self.calls = []
         FakeSMTP.instances.append(self)
 
@@ -457,6 +465,93 @@ class FakeSMTP:
 
     def sendmail(self, sender, receiver, message):
         self.calls.append(("sendmail", sender, receiver, message))
+
+
+def test_slack_request_has_a_timeout(monkeypatch):
+    calls = []
+    monkeypatch.setattr(requests, "post", lambda url, **kw: calls.append(kw) or FakeResponse())
+
+    hc.send_slack_alert("https://example.invalid/hook", "message")
+
+    assert calls[0]["timeout"] == hc.NOTIFY_TIMEOUT_SECONDS
+    assert 0 < hc.NOTIFY_TIMEOUT_SECONDS <= 30
+
+
+def test_smtp_connection_has_a_timeout(monkeypatch):
+    FakeSMTP.instances = []
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    config = {
+        "smtp_server": "smtp.example.invalid",
+        "smtp_port": 587,
+        "sender_email": "monitor@example.invalid",
+        "receiver_email": "admin@example.invalid",
+        "password": "not-a-real-password",
+    }
+
+    hc.send_email_alert(config, "SUBJECT", "BODY")
+
+    assert FakeSMTP.instances[0].kwargs["timeout"] == hc.NOTIFY_TIMEOUT_SECONDS
+
+
+@pytest.fixture
+def silent_server(monkeypatch):
+    """A loopback server that completes the TCP handshake but never answers.
+
+    Returns its port. Real sockets, but only on 127.0.0.1.
+    """
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")  # never route the loopback test through a proxy
+    monkeypatch.setattr(requests, "post", REAL_POST)
+    monkeypatch.setattr(smtplib, "SMTP", REAL_SMTP)
+    monkeypatch.setattr(hc, "NOTIFY_TIMEOUT_SECONDS", 0.5)
+    yield server.getsockname()[1]
+    server.close()  # also releases a sender that was (wrongly) still waiting
+
+
+def call_with_deadline(func, seconds=4):
+    """Return the exception func raised (or None), failing the test if func is still blocked after `seconds`.
+
+    Runs func in a daemon thread so that a sender without a working timeout fails
+    the test instead of hanging the whole test run.
+    """
+    outcome = {}
+
+    def target():
+        try:
+            func()
+            outcome["error"] = None
+        except BaseException as error:  # noqa: BLE001 - reported to the caller
+            outcome["error"] = error
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    if thread.is_alive():
+        pytest.fail(f"still blocked after {seconds}s: the sender has no effective timeout")
+    return outcome["error"]
+
+
+def test_slack_alert_gives_up_when_the_server_never_answers(silent_server):
+    started = time.monotonic()
+    error = call_with_deadline(lambda: hc.send_slack_alert(f"http://127.0.0.1:{silent_server}/hook", "message"))
+    assert isinstance(error, requests.exceptions.Timeout)
+    assert time.monotonic() - started < 2
+
+
+def test_email_alert_gives_up_when_the_server_never_answers(silent_server):
+    config = {
+        "smtp_server": "127.0.0.1",
+        "smtp_port": silent_server,
+        "sender_email": "monitor@example.invalid",
+        "receiver_email": "admin@example.invalid",
+        "password": "not-a-real-password",
+    }
+    started = time.monotonic()
+    error = call_with_deadline(lambda: hc.send_email_alert(config, "SUBJECT", "BODY"))
+    assert isinstance(error, OSError)  # smtplib.SMTPServerDisconnected is an OSError
+    assert time.monotonic() - started < 2
 
 
 def test_email_alert_connects_secures_logs_in_and_sends(monkeypatch):

@@ -38,6 +38,11 @@ LABELS = {"cpu": "CPU", "memory": "Memory", "disk": "Disk"}
 
 ALERT_SUBJECT = "SERVER HEALTH ALERT"
 
+# Seconds to wait on Slack or the SMTP server before giving up on that channel.
+# Without a timeout a server that accepts the connection but never answers
+# would block the monitor forever.
+NOTIFY_TIMEOUT_SECONDS = 10
+
 class ConfigError(ValueError):
     """An invalid setting in the environment or in config/alert_config"""
 
@@ -140,12 +145,12 @@ def send_slack_alert(webhook_url, message):
         "username": "Health Monitor",
         "icon_emoji": ":warning:"
     }
-    response = requests.post(webhook_url, json=payload)
+    response = requests.post(webhook_url, json=payload, timeout=NOTIFY_TIMEOUT_SECONDS)
     response.raise_for_status()
 
 def send_email_alert(email_config, subject, body):
     """Send email alert using SMTP"""
-    with smtplib.SMTP(email_config["smtp_server"], email_config["smtp_port"]) as server:
+    with smtplib.SMTP(email_config["smtp_server"], email_config["smtp_port"], timeout=NOTIFY_TIMEOUT_SECONDS) as server:
         server.starttls()
         server.login(email_config["sender_email"], email_config["password"])
         message = f"Subject: {subject}\n\n{body}"
