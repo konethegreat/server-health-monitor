@@ -9,13 +9,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the health check script
-COPY scripts/health_check.py .
+COPY scripts/health_check.py ./scripts/health_check.py
 
 # Copy configuration example
 COPY config/alert_config.example ./config/
 
 # Make script executable
-RUN chmod +x health_check.py
+RUN chmod +x scripts/health_check.py
 
 # Run the health check script
-CMD ["python", "health_check.py"]
+CMD ["python", "scripts/health_check.py"]
